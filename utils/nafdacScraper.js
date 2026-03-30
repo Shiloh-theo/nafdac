@@ -1,15 +1,13 @@
 const axios = require("axios");
 
 /**
- * Verifies a NAFDAC registration number using the 9ja Checkr API
- * which sources data directly from the official NAFDAC public register.
- *
- * API docs: https://www.9jacheckr.xyz/docs
- * Get your free API key at: https://www.9jacheckr.xyz/dashboard/keys
- * Free tier: 300 calls/month
+ * DIRECT NAFDAC SCRAPER
+ * 
+ * This directly queries the official NAFDAC Greenbook internal JSON API.
+ * No third-party API keys required!
  */
 
-const API_BASE = "https://api.9jacheckr.xyz/api/verify";
+const NAFDAC_URL = "https://greenbook.nafdac.gov.ng/";
 
 function normalizeNafdacNumber(input) {
   const cleaned = input.trim().toUpperCase().replace(/[\s/\\]/g, "-");
@@ -36,57 +34,72 @@ async function verifyNafdacNumber(rawNumber) {
     };
   }
 
-  const apiKey = process.env.NAFDAC_API_KEY;
-  if (!apiKey) {
-    console.error("NAFDAC_API_KEY not set in .env");
-    return fallbackMessage(nafdacNumber);
-  }
-
   try {
-    const response = await axios.get(`${API_BASE}/${nafdacNumber}`, {
-      headers: { "x-api-key": apiKey, "User-Agent": "NAFDACBot/2.0" },
-      timeout: 15000,
+    // We construct the exact DataTables URL parameters the official website uses
+    const params = new URLSearchParams();
+    params.append("draw", "1");
+    params.append("start", "0");
+    params.append("length", "10"); // We only need the top result
+    params.append("search[value]", nafdacNumber); // Global search for the number
+    params.append("columns[5][data]", "NAFDAC"); 
+    params.append("columns[5][search][value]", nafdacNumber); // Specific column search
+
+    // We must send these specific headers so the server thinks we are a normal web browser
+    const response = await axios.get(NAFDAC_URL, {
+      params: params,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest", // <--- CRITICAL: Tells NAFDAC to return JSON, not HTML
+        "Referer": "https://greenbook.nafdac.gov.ng/"
+      },
+      timeout: 20000, // 20 seconds timeout (Gov websites can be slow)
     });
 
     const data = response.data;
 
-    if (data.ok && data.product) {
+    // DataTables returns an array of matches in the "data" property
+    if (data && data.data && data.data.length > 0) {
+      // Get the first product match
+      const product = data.data[0];
+      
       return {
         valid: true,
         status: "FOUND",
         nafdacNumber,
-        product: data.product,
-        message: formatSuccessMessage(nafdacNumber, data.product),
+        product: product,
+        message: formatSuccessMessage(nafdacNumber, product),
       };
     }
 
+    // If the array is empty, the product isn't registered
     return { valid: false, status: "NOT_FOUND", nafdacNumber, message: formatNotFoundMessage(nafdacNumber) };
 
   } catch (error) {
-    if (error.response && error.response.status === 404) {
-      return { valid: false, status: "NOT_FOUND", nafdacNumber, message: formatNotFoundMessage(nafdacNumber) };
-    }
-    if (error.response && error.response.status === 429) {
-      return { valid: null, status: "RATE_LIMITED", nafdacNumber, message: `⏳ *Too Many Requests*\n\nPlease try again in a few minutes.\n\n🔗 Manual check: *https://greenbook.nafdac.gov.ng*` };
-    }
-    console.error("NAFDAC API error:", error.message);
+    console.error("Direct NAFDAC connection error:", error.message);
     return fallbackMessage(nafdacNumber);
   }
 }
 
 function formatSuccessMessage(nafdacNumber, product) {
-  const name = product.name || product.productName || product.product_name || "N/A";
-  const manufacturer = product.manufacturer || product.applicant || product.company || "N/A";
-  const category = product.category || product.productCategory || "N/A";
-  const approvalDate = product.approvalDate || product.approval_date || product.date || "N/A";
+  // Extracting from NAFDAC's exact JSON structure
+  const name = product.product_name || "N/A";
+  const manufacturer = product.applicant?.name || "N/A";
+  const category = product.product_category?.name || "N/A";
+  const approvalDate = product.approval_date || "N/A";
   const status = product.status || "Active";
-  const form = product.form || "";
-  const strength = product.strength || product.strengths || "";
+  const form = product.form?.name || "";
+  const strength = product.strength || "";
+  const activeIngredient = product.ingredient?.ingredient_name || "";
 
   let msg = `✅ *NAFDAC Verification Successful*\n\n📋 *Reg. No:* ${nafdacNumber}\n🏷️ *Product:* ${name}`;
+  
+  if (activeIngredient) msg += `\n🧪 *Ingredient:* ${activeIngredient}`;
   if (form) msg += `\n💊 *Form:* ${form}`;
   if (strength) msg += `\n⚗️ *Strength:* ${strength}`;
+  
   msg += `\n🏭 *Manufacturer:* ${manufacturer}\n📦 *Category:* ${category}\n📅 *Approval Date:* ${approvalDate}\n✔️ *Status:* ${status}\n\n_This product is registered with NAFDAC and approved for sale in Nigeria._\n\n🔗 greenbook.nafdac.gov.ng`;
+  
   return msg;
 }
 
@@ -97,7 +110,7 @@ function formatNotFoundMessage(nafdacNumber) {
 function fallbackMessage(nafdacNumber) {
   return {
     valid: null, status: "ERROR", nafdacNumber,
-    message: `⚠️ *Verification Unavailable*\n\nCould not reach the service right now.\n\n🔍 Verify manually: *https://greenbook.nafdac.gov.ng*\n\nReg. No: *${nafdacNumber}*\n\nTry again in a few minutes.`,
+    message: `⚠️ *Database Unavailable*\n\nThe official NAFDAC servers are currently slow or offline.\n\n🔍 Verify manually later: *https://greenbook.nafdac.gov.ng*\n\nReg. No: *${nafdacNumber}*\n\nPlease try again in a few minutes.`,
   };
 }
 
